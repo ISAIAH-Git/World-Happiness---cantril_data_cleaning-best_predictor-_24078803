@@ -1,0 +1,118 @@
+#!/bin/bash
+
+# ASSIGNMENT 2 - OPEN SOURCE TOOLS AND SCRIPTING - CITS4407
+# Name : Isaiah Rama Veera
+# Student ID : 24078803
+
+# Function to print error messages and exit
+error_exit() {
+    echo "$1" >&2
+    exit 1
+}
+
+# Check if a filename is provided
+if [ -z "$1" ]; then
+    error_exit "Usage: $0 <filename>"
+fi
+
+input_file="$1"
+
+# Check if the input file exists and is not empty
+if [ ! -s "$input_file" ]; then
+    error_exit "Error: The file '$input_file' does not exist or is empty."
+fi
+
+# Function to calculate mean correlation for a predictor
+calculate_mean_correlation() {
+    local predictor_col=$1
+    local cantril_col=$2
+
+    awk -F'\t' -v predictor_col="$predictor_col" -v cantril_col="$cantril_col" '
+    BEGIN {
+        if (predictor_col == "" || cantril_col == "") {
+            print "Error: Missing required column index." > "/dev/stderr"
+            exit 1
+        }
+    }
+    {
+        if ($predictor_col != "" && $cantril_col != "" && $predictor_col ~ /^[0-9.-]+$/ && $cantril_col ~ /^[0-9.-]+$/) {
+            country[$1]++;
+            sum_x[$1] += $predictor_col;
+            sum_y[$1] += $cantril_col;
+            sum_x2[$1] += ($predictor_col)^2;
+            sum_y2[$1] += ($cantril_col)^2;
+            sum_xy[$1] += ($predictor_col) * ($cantril_col);
+        }
+    }
+    END {
+        for (c in country) {
+            if (country[c] >= 3) {
+                n = country[c];
+                mean_x = sum_x[c] / n;
+                mean_y = sum_y[c] / n;
+                num = sum_xy[c] - n * mean_x * mean_y;
+                denom = sqrt((sum_x2[c] - n * mean_x^2) * (sum_y2[c] - n * mean_y^2));
+                if (denom != 0) {
+                    corr = num / denom;
+                    print corr;
+                }
+            }
+        }
+    }
+    ' "$input_file" | awk '{ sum += $1; count++ } END { if (count > 0) printf "%.3f", sum / count; else print "NaN" }'
+}
+
+# Verify that required columns exist in the header
+header=$(head -n 1 "$input_file")
+IFS=$'\t' read -r -a columns <<< "$header"
+
+declare -A col_index
+for i in "${!columns[@]}"; do
+    col_index["${columns[$i]}"]=$((i+1))
+done
+
+required_columns=("Entity" "Code" "Year" "GDP per capita, PPP (constant 2017 international $)" "Population (historical estimates)" "Homicide rate per 100,000 population - Both sexes - All ages" "Life expectancy - Sex: all - Age: at birth - Variant: estimates" "Cantril ladder score")
+for col in "${required_columns[@]}"; do
+    if [[ ! " ${columns[@]} " =~ " ${col} " ]]; then
+        error_exit "Error: Missing required column '$col' in the input file."
+    fi
+done
+
+# Calculating the mean correlations
+corr_gdp=$(tail -n +2 "$input_file" | calculate_mean_correlation ${col_index["GDP per capita, PPP (constant 2017 international $)"]} ${col_index["Cantril ladder score"]})
+corr_population=$(tail -n +2 "$input_file" | calculate_mean_correlation ${col_index["Population (historical estimates)"]} ${col_index["Cantril ladder score"]})
+corr_homicide=$(tail -n +2 "$input_file" | calculate_mean_correlation ${col_index["Homicide rate per 100,000 population - Both sexes - All ages"]} ${col_index["Cantril ladder score"]})
+corr_life=$(tail -n +2 "$input_file" | calculate_mean_correlation ${col_index["Life expectancy - Sex: all - Age: at birth - Variant: estimates"]} ${col_index["Cantril ladder score"]})
+
+# Printing the results with formatted output
+echo "Mean correlation of Homicide Rate with Cantril ladder is $corr_homicide"
+echo "Mean correlation of GDP with Cantril ladder is $corr_gdp"
+echo "Mean correlation of Population with Cantril ladder is $corr_population"
+echo "Mean correlation of Life Expectancy with Cantril ladder is $corr_life"
+
+# Function to determine the best predictor
+determine_best_predictor() {
+    local best_predictor="GDP"
+    local best_corr=$corr_gdp
+
+    if awk "BEGIN {exit !(sqrt($corr_population * $corr_population) > sqrt($best_corr * $best_corr))}"; then
+        best_predictor="Population"
+        best_corr=$corr_population
+    fi
+
+    if awk "BEGIN {exit !(sqrt($corr_homicide * $corr_homicide) > sqrt($best_corr * $best_corr))}"; then
+        best_predictor="Homicide Rate"
+        best_corr=$corr_homicide
+    fi
+
+    if awk "BEGIN {exit !(sqrt($corr_life * $corr_life) > sqrt($best_corr * $best_corr))}"; then
+        best_predictor="Life Expectancy"
+        best_corr=$corr_life
+    fi
+    echo " "
+    echo "Most predictive mean correlation with the Cantril ladder is $best_predictor (r = $best_corr)"
+}
+
+# Determine and print the best predictor
+determine_best_predictor
+

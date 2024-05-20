@@ -1,0 +1,150 @@
+#!/bin/bash
+
+# ASSIGNMENT 2 - OPEN SOURCE TOOLS AND SCRIPTING - CITS4407
+# Name: Isaiah Rama Veera
+# Student ID: 24078803
+
+# Function to print error messages and exit
+error_exit() {
+    echo "$1" >&2
+    exit 1
+}
+
+# Check if exactly three arguments are provided
+if [ "$#" -ne 3 ]; then
+    error_exit "Usage: $0 <file1> <file2> <file3>"
+fi
+
+# Function to check if the file is in TSV format
+check_tsv_format() {
+    local file=$1
+    if ! head -1 "$file" | grep -q $'\t'; then
+        error_exit "Error: File $file is not in TSV format."
+    fi
+}
+
+# Function to identify the type of the file based on its headers
+identify_file_type() {
+    local file=$1
+    if grep -q "GDP per capita" "$file"; then
+        echo "gdp"
+    elif grep -q "Homicide rate" "$file"; then
+        echo "homicide"
+    elif grep -q "Life expectancy" "$file"; then
+        echo "life"
+    else
+        echo "unknown"
+    fi
+}
+
+# Check if the input files are in TSV format
+check_tsv_format "$1"
+check_tsv_format "$2"
+check_tsv_format "$3"
+
+# Identify the type of each input file
+type1=$(identify_file_type "$1")
+type2=$(identify_file_type "$2")
+type3=$(identify_file_type "$3")
+
+# Assign files to variables based on their type
+for type in gdp homicide life; do
+    if [ "$type1" == "$type" ]; then
+        eval "${type}_file=\$1"
+    elif [ "$type2" == "$type" ]; then
+        eval "${type}_file=\$2"
+    elif [ "$type3" == "$type" ]; then
+        eval "${type}_file=\$3"
+    else
+        error_exit "Error: Could not identify $type file"
+    fi
+done
+
+# Check if all necessary files are assigned
+if [[ -z "$gdp_file" || -z "$homicide_file" || -z "$life_file" ]]; then
+    error_exit "All three files (gdp, homicide, life) must be provided"
+fi
+
+# Function to clean and validate the data
+clean_data() {
+    local input_file=$1
+    local output_file=$2
+
+    awk -F'\t' -v OFS='\t' '
+    BEGIN {
+        warning_count = 0
+        remove_column = -1
+    }
+    NR == 1 {
+        split($0, header)
+        for (i in header) {
+            col_index[header[i]] = i
+            if (header[i] == "Continent") {
+                remove_column = i
+            }
+        }
+        next
+    }
+    {
+        if (NF != length(header)) {
+            if (warning_count < 5) {
+                print "Warning: Line " NR " in " FILENAME " has " NF " columns instead of " length(header) > "/dev/stderr"
+                warning_count++
+            }
+        }
+        if ($col_index["Code"] == "" || $col_index["Year"] < 2011 || $col_index["Year"] > 2021) next
+        key = $1 "-" $3
+        line = $1 "\t" $2 "\t" $3 "\t" key
+        for (i = 4; i <= NF; i++) {
+            if (i != remove_column) {
+                line = line OFS $i
+            }
+        }
+        print line
+    }
+    ' "$input_file" > "$output_file" || error_exit "Error processing file $input_file"
+}
+
+# Temporary files to store cleaned and sorted data
+gdp_cleaned=$(mktemp) || error_exit "Failed to create temporary file for GDP data"
+homicide_cleaned=$(mktemp) || error_exit "Failed to create temporary file for Homicide data"
+life_cleaned=$(mktemp) || error_exit "Failed to create temporary file for Life data"
+gdp_cleaned_sorted=$(mktemp) || error_exit "Failed to create temporary file for sorted GDP data"
+homicide_cleaned_sorted=$(mktemp) || error_exit "Failed to create temporary file for sorted Homicide data"
+life_cleaned_sorted=$(mktemp) || error_exit "Failed to create temporary file for sorted Life data"
+gdp_homicide_merged=$(mktemp) || error_exit "Failed to create temporary file for merged GDP and Homicide data"
+gdp_homicide_merged_sorted=$(mktemp) || error_exit "Failed to create temporary file for sorted merged GDP and Homicide data"
+final_merged=$(mktemp) || error_exit "Failed to create temporary file for final merged data"
+
+# Clean the data
+clean_data "$gdp_file" "$gdp_cleaned"
+clean_data "$homicide_file" "$homicide_cleaned"
+clean_data "$life_file" "$life_cleaned"
+
+# Sort the cleaned data by the combination key
+sort -t $'\t' -k4,4 "$gdp_cleaned" > "$gdp_cleaned_sorted" || error_exit "Error sorting cleaned GDP data"
+sort -t $'\t' -k4,4 "$homicide_cleaned" > "$homicide_cleaned_sorted" || error_exit "Error sorting cleaned Homicide data"
+sort -t $'\t' -k4,4 "$life_cleaned" > "$life_cleaned_sorted" || error_exit "Error sorting cleaned Life data"
+
+# Perform the first join using the Entity-Year key
+join -t $'\t' -1 4 -2 4 -o 1.1 1.2 1.3 1.4 1.5 1.6 1.7 2.5 "$gdp_cleaned_sorted" "$homicide_cleaned_sorted" > "$gdp_homicide_merged" || error_exit "Error joining GDP and Homicide data"
+
+# Ensure the intermediate merged data is sorted before the next join
+sort -t $'\t' -k4,4 "$gdp_homicide_merged" > "$gdp_homicide_merged_sorted" || error_exit "Error sorting merged GDP and Homicide data"
+
+# Perform the final join using the Entity-Year key
+join -t $'\t' -1 4 -2 4 -o 1.1 1.2 1.3 1.6 1.7 1.8 2.5 2.6 "$gdp_homicide_merged_sorted" "$life_cleaned_sorted" > "$final_merged" || error_exit "Error joining merged GDP-Homicide data with Life data"
+
+# Output the final cleaned data to stdout with the required columns
+awk -F'\t' -v OFS='\t' '
+BEGIN {
+    print "Entity", "Code", "Year", "GDP per capita, PPP (constant 2017 international $)", "Population (historical estimates)", "Homicide rate per 100,000 population - Both sexes - All ages", "Life expectancy - Sex: all - Age: at birth - Variant: estimates", "Cantril ladder score"
+}
+{
+    print $1, $2, $3, $4, $5, $6, $7, $8
+}
+' "$final_merged" > cleaned_data_file.tsv || error_exit "Error printing final merged data"
+
+# Remove temporary files
+rm "$gdp_cleaned" "$homicide_cleaned" "$life_cleaned" "$gdp_cleaned_sorted" "$homicide_cleaned_sorted" "$life_cleaned_sorted" "$gdp_homicide_merged" "$gdp_homicide_merged_sorted" "$final_merged" || error_exit "Error removing temporary files"
+
